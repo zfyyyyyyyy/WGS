@@ -1,0 +1,51 @@
+# 下载NCBI糯米稻WGS的SRA数据到本地文件夹
+prefetch -v -O . SRR28728328
+
+# 将SRA文件转换为fastq格式的文件，并分成单独的文件存放
+fastq-dump --split-files -O . SRR28728328.sra
+
+# 使用gzip命令压缩fastq文件以节省空间
+gzip *.fastq
+
+# 计算gzip压缩的fastq文件的MD5校验值并保存到md5.txt文件
+md5sum *gz > md5.txt
+#查看MD5值
+cat md5.txt
+# 验证md5.txt中记录的MD5值与实际文件的MD5值是否一致
+md5sum -c md5.txt
+
+# 使用fastqc工具对fastq文件进行质量评估，双端测序结果都无需进一步处理
+fastqc SRR*gz
+
+# 使用bwa软件建立参考基因组的索引，为后续比对步骤做准备
+bwa index NIP-T2T.fa
+
+# 使用bwa mem命令进行比对，并将结果输出为SAM格式，然后通过samtools转换为BAM格式
+bwa mem -t 4 -R '@RG\tID:L001_lane\tPL:UNKNOWN\tLB:library\tSM:M13' ../00ref/NIP-T2T.fa SRR28728328_1.fastq.gz SRR28728328_2.fastq.gz | samtools view -S -b - > M13.bam
+
+# 使用samtools对BAM文件进行排序，以准备后续处理
+samtools sort -@ 4 -O bam -o M13.sorted.bam M13.bam
+
+# 使用Picard工具的MarkDuplicates命令去除PCR重复序列
+java -jar picard.jar MarkDuplicates I=M13.sorted.bam O=M13.sorted.markdup.bam M=M13.sorted.markdup_metrics.txt
+
+# 为去除PCR重复的BAM文件建立索引，便于后续读取和处理
+samtools index M13.sorted.markdup.bam
+
+# 使用Picard工具创建序列字典，这对后期局部比对和变异检测有用
+picard CreateSequenceDictionary R=NIP-T2T.fa O=NIP-T2T.dict
+
+# 从指定的URL下载水稻的known-sites VCF文件，这些是已知的变异位点进行参考，--known-sites为软件必须输入
+wget -c -O my_rice_variants.vcf.gz https://ricevarmap.ncpgr.cn/media/Genotypes/Imputated_genotypes/rice4k_geno_no_del.vcf.gz
+# 使用GATK的BQSRPipelineSpark工具进行碱基质量值重新校正
+gatk BQSRPipelineSpark \
+-R /root/biotrainee/wgs/00ref/NIP-T2T.fa \
+--known-sites /root/biotrainee/wgs/00ref/my_rice_variants.vcf.gz \
+-I M13.sorted.markdup.bam \
+-O M13.sorted.markdup.bqsr.bam
+
+# 使用GATK的HaplotypeCaller进行局部比对和变异发现
+gatk HaplotypeCaller \
+-R /root/biotrainee/wgs/00ref/NIP-T2T.fa \
+-I M13.sorted.markdup.bqsr.bam \
+-O M13.g.vcf.gz
